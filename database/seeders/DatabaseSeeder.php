@@ -14,8 +14,12 @@ class DatabaseSeeder extends Seeder
      */
     public function run()
     {
-        DB::table("truncate");
+        // Call the AccountGroupsSeeder
+        $this->call([
+            AccountGroupsSeeder::class,
+        ]);
         
+        // Keep existing ac_accounts data
         DB::table("ac_accounts")->insert([
             'account_name' => 'asset',
             'account_code' => '1',

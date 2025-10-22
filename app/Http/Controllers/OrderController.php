@@ -16,6 +16,10 @@ use Illuminate\Support\Facades\DB;
 use Brian2694\Toastr\Facades\Toastr;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Controllers\Account\AccountsHelper;
+use App\Http\Controllers\Account\Models\SubsidiaryLedger;
+use App\Http\Controllers\Account\Models\AccountsConfiguration;
+
 
 class OrderController extends Controller
 {
@@ -989,12 +993,54 @@ class OrderController extends Controller
             Toastr::error('Delivery Man Already Assigned', 'Error');
             return back();
         }
-
+        dd($request->all());
         if ($request->order_status) {
 
             if ($request->order_status == 4 && $data->payment_method == 1) {
                 $data->payment_status = 1;
+                
+                // Generate voucher for cancelled COD order
+                try {
+                    // Find appropriate ledger accounts
+                    $cashLedger = AccountsConfiguration::where(function ($q) {
+                        $q->where('account_type', 'Cash')
+                        ->orWhere('account_name', 'like', '%Cash%');
+                    })
+                    ->where('is_active', 1)
+                    // ->firstOrFail();
+                    ->first();
+                    $salesLedger = AccountsConfiguration::where(function ($q) {
+                        $q->where('account_type', 'Sales')
+                        ->orWhere('account_name', 'like', '%Sales%');
+                    })
+                    ->where('is_active', 1)
+                    ->first();
+                    
+                    if ($cashLedger && $salesLedger) {
+                        $voucherData = [
+                            'trans_date' => now()->format('Y-m-d'),
+                            'remarks' => 'Order Cancelled - COD Order #' . $data->order_no,
+                            'line_items' => [
+                                [
+                                    'dr_ledger_id' => $cashLedger->ledger_code,
+                                    'cr_ledger_id' => $salesLedger->ledger_code,
+                                    'amount' => $data->total
+                                ]
+                            ]
+                        ];
+                        
+                        $result = AccountsHelper::receiveVoucherStore($voucherData);
+
+                        if (!$result['success']) {
+                            throw new \Exception($result['message']);
+                        }
+                    } 
+                } catch (\Exception $e) {
+                    Toastr::error('Voucher generation failed: ' . $e->getMessage(), 'Error');
+                    return back();
+                }
             }
+            
 
             $data->order_remarks = $request->order_remarks;
 

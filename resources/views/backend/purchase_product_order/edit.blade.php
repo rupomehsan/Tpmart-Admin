@@ -97,6 +97,13 @@
                                 <input type="date" class="form-control" name="purchase_date" v-model="purchaseDate"
                                     required>
                             </div>
+                            <div class="col-md-4 mt-4">
+                                <label for="payment_status">Payment Status</label>
+                                <select id="payment_status" class="form-control" data-toggle="select2" name="payment_status" required>
+                                    <option value="due" {{ $data->payment_status == 'due' ? 'selected' : '' }}>Due</option>
+                                    <option value="paid" {{ $data->payment_status == 'paid' ? 'selected' : '' }}>Paid</option>
+                                </select>
+                            </div>
                         </div>
 
                         <div class="d-flex justify-content-center">

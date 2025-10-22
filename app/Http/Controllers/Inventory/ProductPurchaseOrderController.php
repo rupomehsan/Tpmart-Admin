@@ -22,6 +22,13 @@ use DataTables;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use App\Http\Controllers\Account\AccountsHelper;
+use App\Http\Controllers\Account\Models\AccountTransaction;
+use App\Http\Controllers\Account\Models\SubsidiaryLedger;
+use App\Http\Controllers\Account\Models\AccountTransactionDetail;
+use App\Http\Controllers\Account\Models\SubsidiaryCalculation;
+use App\Http\Controllers\Account\Models\AccountsConfiguration;
+
 
 class ProductPurchaseOrderController extends Controller
 {
@@ -97,6 +104,7 @@ class ProductPurchaseOrderController extends Controller
         $order->subtotal = request()->subtotal_amt;
         $order->total = request()->grand_total_amt;
         $order->note = request()->purchase_note;
+        $order->payment_status = request()->payment_status ?? 'due';
         // $order->code = $new_code;
         // $order->reference = $new_reference;
         $order->order_status = 'pending';
@@ -270,6 +278,7 @@ class ProductPurchaseOrderController extends Controller
         $order->subtotal = request()->subtotal;
         $order->total = request()->grand_total_amt;
         $order->note = request()->purchase_note;
+        $order->payment_status = request()->payment_status ?? 'due';
         // $order->is_ordered = 'pending';
         $order->creator = $user->id;
         $order->status = 'active';
@@ -394,12 +403,36 @@ class ProductPurchaseOrderController extends Controller
             $product_stock->slug = $slug;
             $product_stock->save();
 
+
+
             $productModel = Product::where('id', $product->product_id)->first();
             // logger()->info('Product Model:', ['productModel' => $productModel]);
             if ($productModel) {
                 // logger()->info('Product found:', ['product_id' => $productModel->id, 'current_stock' => $productModel->stock]);
+                // Calculate average costing price
+                $currentStock = $productModel->stock;
+                $currentCostingPrice = $productModel->average_costing_price ?? $productModel->last_purchase_price ?? 0; // Only use existing costing_price, not MRP
+                $newQty = $product_stock->qty;
+                $newPurchasePrice = $product_stock->purchase_price;
+                
+                // Calculate weighted average costing price
+                if ($currentStock > 0 && $currentCostingPrice > 0) {
+                    // If we have existing stock with costing price, calculate weighted average
+                    $totalCurrentValue = $currentStock * $currentCostingPrice;
+                    $totalNewValue = $newQty * $newPurchasePrice;
+                    $totalQty = $currentStock + $newQty;
+                    $averageCostingPrice = ($totalCurrentValue + $totalNewValue) / $totalQty;
+                } else {
+                    // If no existing stock or costing price, use purchase price as costing price
+                    $averageCostingPrice = $newPurchasePrice;
+                }
+                
+                // Update product with new stock and average costing price
                 $productModel->stock += $product_stock->qty;
-                // logger()->info('Updated stock:', ['product_id' => $productModel->id, 'new_stock' => $productModel->stock]);
+                $productModel->last_purchase_price = $product_stock->purchase_price;
+                $productModel->average_costing_price = $averageCostingPrice;
+                
+                // logger()->info('Updated stock:', ['product_id' => $productModel->id, 'new_stock' => $productModel->stock, 'average_costing_price' => $averageCostingPrice]);
                 $productModel->update();
                 // logger()->info('Product stock updated successfully.', ['product_id' => $productModel->id]);
             } else {
@@ -407,8 +440,44 @@ class ProductPurchaseOrderController extends Controller
             }
         }
 
+        // Generate voucher based on payment status
+        try {
+        // dd($data->payment_status);
+            if ($data->payment_status == 'due') {
+                // Generate Journal Voucher (JV) for due payment
+                // This will show: Inventory increases, Supplier liability increases
+                logger()->info('=== DUE PAYMENT TRANSACTION FLOW ===', [
+                    'order_id' => $data->id,
+                    'order_code' => $data->code,
+                    'total_amount' => $data->total,
+                    'message' => 'Inventory will increase, Supplier liability will increase (no cash movement)'
+                ]);
+                $this->generateJournalVoucher($data);
+            } else {
+                // Generate Payment Voucher for paid order
+                // This will show: Cash decreases, Inventory increases, Supplier payment made
+                logger()->info('=== PAID ORDER TRANSACTION FLOW ===', [
+                    'order_id' => $data->id,
+                    'order_code' => $data->code,
+                    'total_amount' => $data->total,
+                    'message' => 'Cash will decrease, Inventory will increase, Supplier payment will be made'
+                ]);
+                $this->generatePaymentVoucher($data);
+            }
+        } catch (\Exception $e) {
+            logger()->error('Voucher generation failed: ' . $e->getMessage());
+            Toastr::warning('Order confirmed but voucher generation failed: ' . $e->getMessage(), 'Warning');
+        }
 
         Toastr::success('Order Confirmation Has been Successfull', 'Success!');
+        
+        // Show transaction summary to user
+        if ($data->payment_status == 'paid') {
+            Toastr::info('Cash decreased, Inventory increased, Supplier payment made', 'Transaction Summary');
+        } else {
+            Toastr::info('Inventory increased, Supplier liability created (No cash movement)', 'Transaction Summary');
+        }
+        
         return redirect()->route('ViewAllPurchaseProductOrder');
     }
 
@@ -438,4 +507,261 @@ class ProductPurchaseOrderController extends Controller
 
         return response()->json($products);
     }
+
+
+
+    private function generateJournalVoucher($purchaseOrder)
+    {
+        try {
+            // === Ledgers ===
+            $supplierLedger = AccountsConfiguration::where(function ($q) {
+                    $q->where('account_type', 'Supplier Payable')
+                    ->orWhere('account_name', 'like', '%Supplier%')
+                    ->orWhere('account_name', 'like', '%Vendor%');
+                })
+                ->where('is_active', 1)
+                ->firstOrFail();
+
+            $inventoryLedger = AccountsConfiguration::where(function ($q) {
+                    $q->where('account_name', 'like', '%inventory%')
+                    ->orWhere('account_name', 'like', '%Stock%')
+                    ->orWhere('account_name', 'like', '%purchase%');
+                })
+                ->where('is_active', 1)
+                ->firstOrFail();
+
+            $taxLedger = AccountsConfiguration::where(function ($q) {
+                    $q->where('account_name', 'like', '%Tax%')
+                    ->orWhere('account_name', 'like', '%VAT%');
+                })
+                ->where('is_active', 1)
+                ->first();
+
+            $shippingLedger = AccountsConfiguration::where(function ($q) {
+                    $q->where('account_name', 'like', '%Shipping%')
+                    ->orWhere('account_name', 'like', '%Freight%')
+                    ->orWhere('account_name', 'like', '%Transport%');
+                })
+                ->where('is_active', 1)
+                ->first();
+
+            // === Amounts ===
+            $totalProductAmount = 0;
+            $totalTaxAmount = 0;
+            $shippingAmount = $purchaseOrder->other_charge_amount ?? 0;
+
+            foreach ($purchaseOrder->order_products as $product) {
+                $unitPrice = $product->product_price;
+                $discountPercent = $product->discount_amount ?? 0;
+                $taxPercent = $product->tax ?? 0;
+
+                $discountedPrice = $unitPrice * (1 - ($discountPercent / 100));
+                $productAmount = $discountedPrice * $product->qty;
+                $taxAmount = $productAmount * ($taxPercent / 100);
+
+                $totalProductAmount += $productAmount;
+                $totalTaxAmount += $taxAmount;
+            }
+
+            // === Journal Entries ===
+            $lineItems = [];
+
+            // 1. Inventory Stock (Debit)
+            if ($totalProductAmount > 0) {
+                $lineItems[] = [
+                    'dr_ledger_id'  => $inventoryLedger->account_code,
+                    'cr_ledger_id' => $supplierLedger->account_code,
+                    'amount'           => $totalProductAmount+$totalTaxAmount+$shippingAmount,
+                    'description'      => "Inventory Stock - Product Purchase"
+                ];
+            }
+
+            // // 2. Tax (Debit)
+            // if ($totalTaxAmount > 0 && $taxLedger) {
+            //     $lineItems[] = [
+            //         'dr_ledger_id'  => $taxLedger->account_code,
+            //         'cr_ledger_id' => $supplierLedger->account_code,
+            //         'amount'           => $totalTaxAmount,
+            //         'description'      => "Tax - Purchase Tax"
+            //     ];
+            // }
+
+            // // 3. Shipping (Debit)
+            // if ($shippingAmount > 0 && $shippingLedger) {
+            //     $lineItems[] = [
+            //         'dr_ledger_id'  => $shippingLedger->account_code,
+            //         'cr_ledger_id' => $supplierLedger->account_code,
+            //         'amount'           => $shippingAmount,
+            //         'description'      => "Shipping/Freight - Purchase Expense"
+            //     ];
+            // }
+
+            $voucherData = [
+                'trans_date' => $purchaseOrder->date,
+                'remarks'    => 'Purchase (Due) - Order: ' . $purchaseOrder->code,
+                'line_items' => $lineItems
+            ];
+
+            // dd($voucherData);
+            $result = AccountsHelper::journalVoucherStore($voucherData);
+            if (!$result['success']) {
+                throw new \Exception($result['message']);
+            }
+
+            logger()->info('Journal Voucher Created for Due Purchase', [
+                'voucher_no' => $result['voucher_no'],
+                'order_id'   => $purchaseOrder->id,
+                'total'      => $totalProductAmount + $totalTaxAmount + $shippingAmount,
+            ]);
+
+        } catch (\Exception $e) {
+            logger()->error('Journal Voucher generation failed', [
+                'order_id' => $purchaseOrder->id,
+                'error'    => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    private function generatePaymentVoucher($purchaseOrder)
+    {
+        try {
+            // === Ledgers ===
+            $supplierLedger = AccountsConfiguration::where(function ($q) {
+                    $q->where('account_type', 'Supplier Payable')
+                    ->orWhere('account_name', 'like', '%Supplier%')
+                    ->orWhere('account_name', 'like', '%Vendor%');
+                })
+                ->where('is_active', 1)
+                // ->firstOrFail();
+                ->first();
+
+            $cashLedger = AccountsConfiguration::where(function ($q) {
+                    $q->where('account_type', 'Cash')
+                    ->orWhere('account_type', 'Bank')
+                    ->orWhere('account_name', 'like', '%Cash%')
+                    ->orWhere('account_name', 'like', '%Bank%');
+                })
+                ->where('is_active', 1)
+                // ->firstOrFail();
+                ->first();
+
+            $inventoryLedger = AccountsConfiguration::where('account_name', 'like', '%Inventory%')
+                ->where('is_active', 1)
+                // ->firstOrFail();
+                ->first();
+
+            $taxLedger = AccountsConfiguration::where('account_name', 'like', '%Tax%')
+                ->where('is_active', 1)
+                // ->firstOrFail();
+                ->first();
+
+            $shippingLedger = AccountsConfiguration::where(function ($q) {
+                    $q->where('account_name', 'like', '%Shipping%')
+                    ->orWhere('account_name', 'like', '%Freight%')
+                    ->orWhere('account_name', 'like', '%Transport%');
+                })
+                ->where('is_active', 1)
+                // ->firstOrFail();
+                ->first();
+
+            // === Amounts ===
+            $totalProductAmount = 0;
+            $totalTaxAmount = 0;
+            $shippingAmount = $purchaseOrder->other_charge_amount ?? 0;
+
+            foreach ($purchaseOrder->order_products as $product) {
+                $unitPrice = $product->product_price;
+                $discountPercent = $product->discount_amount ?? 0;
+                $taxPercent = $product->tax ?? 0;
+
+                $discountedPrice = $unitPrice * (1 - ($discountPercent / 100));
+                $productAmount = $discountedPrice * $product->qty;
+                $taxAmount = $productAmount * ($taxPercent / 100);
+
+                $totalProductAmount += $productAmount;
+                $totalTaxAmount += $taxAmount;
+            }
+
+            // === Payment Entries ===
+            $lineItems = [];
+
+            // 1. Inventory Stock (Debit)
+            // if ($totalProductAmount > 0) {
+            //     $lineItems[] = [
+            //         'dr_ledger_id' => $inventoryLedger->account_code,
+            //         'cr_ledger_id'        => $supplierLedger->account_code,
+            //         'amount'            => $totalProductAmount,
+            //         'description'       => "Inventory Stock - Product Purchase"
+            //     ];
+            // }
+
+            // 1. Inventory Stock (Debit)
+            if ($totalProductAmount > 0) {
+                $lineItems[] = [
+                    // 'dr_ledger_id' => $supplierLedger->account_code,
+                    'dr_ledger_id' => $inventoryLedger->account_code,
+                    'cr_ledger_id'        => $cashLedger->account_code,
+                    'amount'            => $totalProductAmount,
+                    'description'       => "Inventory Stock - Product Purchase"
+                ];
+            }
+
+            // 2. Tax (Debit)
+            if ($totalTaxAmount > 0 && $taxLedger) {
+                $lineItems[] = [
+                    'dr_ledger_id' => $taxLedger->account_code,
+                    'cr_ledger_id'        => $cashLedger->account_code,
+                    'amount'            => $totalTaxAmount,
+                    'description'       => "Tax - Purchase Tax"
+                ];
+            }
+
+            // 3. Shipping (Debit)
+            if ($shippingAmount > 0 && $shippingLedger) {
+                $lineItems[] = [
+                    'dr_ledger_id' => $shippingLedger->account_code,
+                    'cr_ledger_id'        => $cashLedger->account_code,
+                    'amount'            => $shippingAmount,
+                    'description'       => "Shipping Cost - Freight Charges"
+                ];
+            }
+
+            // 4. Supplier Payable (Credit / payment)
+            // $lineItems[] = [
+            //     'dr_ledger_id' => $supplierLedger->account_code,
+            //     'cr_ledger_id'        => $cashLedger->account_code,
+            //     'amount'            => $purchaseOrder->total,
+            //     'description'       => "Vendor Payment - Purchase Cleared"
+            // ];
+
+            $voucherData = [
+                'trans_date'   => $purchaseOrder->date,
+                'total_amount' => $purchaseOrder->total,
+                'remarks'      => 'Purchase Payment - Order: ' . $purchaseOrder->code,
+                'line_items'   => $lineItems
+            ];
+
+            $result = AccountsHelper::paymentVoucherStore($voucherData);
+
+            if (!$result['success']) {
+                throw new \Exception($result['message']);
+            }
+
+            logger()->info('Payment Voucher Created for Paid Purchase', [
+                'voucher_no' => $result['voucher_no'],
+                'order_id'   => $purchaseOrder->id,
+                'total'      => $purchaseOrder->total,
+            ]);
+
+        } catch (\Exception $e) {
+            logger()->error('Payment Voucher generation failed', [
+                'order_id' => $purchaseOrder->id,
+                'error'    => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+
 }

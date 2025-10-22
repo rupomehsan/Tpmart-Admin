@@ -344,7 +344,7 @@ class JournalVoucherController extends Controller
     {
         $journalVoucher = AccountTransaction::with('accTransactionDetails')->findOrFail($id);
         
-        // Process transaction details for display
+        // Process transaction details for display with grouping
         $debitEntries = [];
         $creditEntries = [];
         $totalDebit = 0;
@@ -354,23 +354,29 @@ class JournalVoucherController extends Controller
             $debitLedger = SubsidiaryLedger::find($detail->dr_sub_ledger);
             $creditLedger = SubsidiaryLedger::find($detail->cr_sub_ledger);
             
-            if ($debitLedger) {
-                $debitEntries[] = [
-                    'code' => $debitLedger->ledger_code,
-                    'particulars' => $debitLedger->name,
-                    'amount' => $detail->amount
+            // Group debit entries by ledger ID
+            $debitKey = $detail->dr_sub_ledger;
+            if (!isset($debitEntries[$debitKey])) {
+                $debitEntries[$debitKey] = [
+                    'code' => $debitLedger->ledger_code ?? $detail->dr_sub_ledger,
+                    'particulars' => $debitLedger->name ?? 'N/A',
+                    'amount' => 0
                 ];
-                $totalDebit += $detail->amount;
             }
+            $debitEntries[$debitKey]['amount'] += $detail->amount;
+            $totalDebit += $detail->amount;
             
-            if ($creditLedger) {
-                $creditEntries[] = [
-                    'code' => $creditLedger->ledger_code,
-                    'particulars' => $creditLedger->name,
-                    'amount' => $detail->amount
+            // Group credit entries by ledger ID
+            $creditKey = $detail->cr_sub_ledger;
+            if (!isset($creditEntries[$creditKey])) {
+                $creditEntries[$creditKey] = [
+                    'code' => $creditLedger->ledger_code ?? $detail->cr_sub_ledger,
+                    'particulars' => $creditLedger->name ?? 'N/A',
+                    'amount' => 0
                 ];
-                $totalCredit += $detail->amount;
             }
+            $creditEntries[$creditKey]['amount'] += $detail->amount;
+            $totalCredit += $detail->amount;
         }
         
         $amountInWords = AccountsHelper::numberToWords($journalVoucher->amount).' Taka Only'	;

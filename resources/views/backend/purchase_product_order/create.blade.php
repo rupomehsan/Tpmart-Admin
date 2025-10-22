@@ -111,6 +111,13 @@
                                 <label for="date">Purchase Date</label>
                                 <input type="date" class="form-control" name="purchase_date" required>
                             </div>
+                            <div class="col-md-4 mt-4">
+                                <label for="payment_status">Payment Status</label>
+                                <select id="payment_status" class="form-control" data-toggle="select2" name="payment_status" required>
+                                    <option value="due">Due</option>
+                                    <option value="paid">Paid</option>
+                                </select>
+                            </div>
                         </div>
 
                         <div class="d-flex justify-content-center">

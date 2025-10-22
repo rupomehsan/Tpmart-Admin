@@ -30,6 +30,8 @@ use App\Models\OrderDetails;
 use App\Models\OrderPayment;
 use App\Models\OrderProgress;
 use App\Models\ShippingInfo;
+use App\Http\Controllers\Account\AccountsHelper;
+use App\Http\Controllers\Account\Models\AccountsConfiguration;
 
 class PosController extends Controller
 {
@@ -763,6 +765,104 @@ class PosController extends Controller
             'created_at' => Carbon::now()
         ]);
 
+        // Generate voucher for POS order
+        try {
+            // Find appropriate ledger accounts
+            $cashLedger = AccountsConfiguration::where(function ($q) {
+                $q->where('account_type', 'Cash')
+                ->orWhere('account_name', 'like', '%Cash%');
+            })
+            ->where('is_active', 1)
+            ->first();
+            
+            $salesLedger = AccountsConfiguration::where(function ($q) {
+                $q->where('account_type', 'Sales')
+                ->orWhere('account_name', 'like', '%Sales%');
+            })
+            ->where('is_active', 1)
+            ->first();
+            
+            // Find shipping/transport ledger
+            $shippingLedger = AccountsConfiguration::where(function ($q) {
+                $q->where('account_type', 'Transport')
+                ->orWhere('account_name', 'like', '%Shipping%')
+                ->orWhere('account_name', 'like', '%Delivery%')
+                ->orWhere('account_name', 'like', '%Transport%');
+            })
+            ->where('is_active', 1)
+            ->first();
+            
+            if ($cashLedger && $salesLedger) {
+                $lineItems = [];
+                
+                // Add sales entry (sub_total - discount)
+                $salesAmount = $orderInfo->sub_total - ($orderInfo->discount ?? 0) - ($orderInfo->coupon_price ?? 0);
+                if ($salesAmount > 0) {
+                    $lineItems[] = [
+                        'dr_ledger_id' => $cashLedger->account_code,
+                        'cr_ledger_id' => $salesLedger->account_code,
+                        'amount' => $salesAmount
+                    ];
+                }
+                
+                // Add shipping charges entry if exists
+                if ($orderInfo->delivery_fee > 0 && $shippingLedger) {
+                    $lineItems[] = [
+                        'dr_ledger_id' => $cashLedger->account_code,
+                        'cr_ledger_id' => $shippingLedger->account_code,
+                        'amount' => $orderInfo->delivery_fee
+                    ];
+                } elseif ($orderInfo->delivery_fee > 0) {
+                    // If no shipping ledger found, add to sales ledger
+                    $lineItems[] = [
+                        'dr_ledger_id' => $cashLedger->account_code,
+                        'cr_ledger_id' => $salesLedger->account_code,
+                        'amount' => $orderInfo->delivery_fee
+                    ];
+                }
+                
+                $voucherData = [
+                    'trans_date' => now()->format('Y-m-d'),
+                    'remarks' => 'POS Sale - Order #' . $orderInfo->order_no,
+                    'line_items' => $lineItems
+                ];
+                
+                $result = AccountsHelper::receiveVoucherStore($voucherData);
+
+                if (!$result['success']) {
+                    throw new \Exception($result['message']);
+                }
+                
+                // Log successful voucher generation
+                \Log::info('POS Voucher generated successfully', [
+                    'order_id' => $orderId,
+                    'order_no' => $orderInfo->order_no,
+                    'voucher_no' => $result['voucher_no'],
+                    'total_amount' => $orderInfo->total,
+                    'sales_amount' => $salesAmount,
+                    'shipping_amount' => $orderInfo->delivery_fee,
+                    'cash_ledger' => $cashLedger->account_code,
+                    'sales_ledger' => $salesLedger->account_code,
+                    'shipping_ledger' => $shippingLedger ? $shippingLedger->account_code : 'N/A'
+                ]);
+            } else {
+                \Log::error('Required ledger accounts not found for POS voucher generation', [
+                    'order_id' => $orderId,
+                    'order_no' => $orderInfo->order_no,
+                    'cash_ledger_found' => $cashLedger ? true : false,
+                    'sales_ledger_found' => $salesLedger ? true : false,
+                    'shipping_ledger_found' => $shippingLedger ? true : false,
+                    'shipping_amount' => $orderInfo->delivery_fee
+                ]);
+            }
+        } catch (\Exception $e) {
+            \Log::error('POS Voucher generation failed', [
+                'order_id' => $orderId,
+                'order_no' => $orderInfo->order_no,
+                'error' => $e->getMessage()
+            ]);
+            // Don't stop the order process if voucher generation fails
+        }
 
         // sending order sms start
         if ($request->shipping_phone && env('APP_ENV') != 'local') {
