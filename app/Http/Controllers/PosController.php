@@ -513,6 +513,7 @@ class PosController extends Controller
 
     public function placeOrder(Request $request)
     {
+      
         // Conditional validation based on delivery method
         $validationRules = [
             'customer_id' => 'nullable|exists:users,id',
@@ -586,6 +587,8 @@ class PosController extends Controller
         $roundOff = $grandTotal - floor($grandTotal);
 
         $grandTotalwithoutRoundOff = $grandTotal - $roundOff;
+
+        
 
         // dd(
         //     request()->all(),
@@ -698,6 +701,7 @@ class PosController extends Controller
                 'qty' => $details['quantity'],
                 'unit_id' => $product->unit_id,
                 'unit_price' => $details['price'],
+                'avg_cost_price' => $product->avg_cost_price ?? 0, // Add average cost price from product table
                 'total_price' => ($details['price'] - $details['discounted_price']) * $details['quantity'],
                 'created_at' => Carbon::now()
             ]);
@@ -864,6 +868,8 @@ class PosController extends Controller
             // Don't stop the order process if voucher generation fails
         }
 
+        // dd($request->all());
+            
         // sending order sms start
         if ($request->shipping_phone && env('APP_ENV') != 'local') {
 

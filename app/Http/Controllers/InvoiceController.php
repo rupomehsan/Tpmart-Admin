@@ -40,7 +40,8 @@ class InvoiceController extends Controller
             }
 
             // Generate invoice using the Invoice model
-            $invoice = Invoice::find($orderId);
+            $invoice = new Invoice();
+            $invoice->id = $orderId;
             $invoice->markAsInvoiced();
 
             return response()->json([
@@ -164,7 +165,8 @@ class InvoiceController extends Controller
         
         // Auto-generate invoice if it doesn't exist
         if (!Invoice::hasInvoice($orderId)) {
-            $invoice = Invoice::find($orderId);
+            $invoice = new Invoice();
+            $invoice->id = $orderId;
             $invoice->markAsInvoiced();
         }
 
@@ -213,7 +215,8 @@ class InvoiceController extends Controller
         
         // Auto-generate invoice if it doesn't exist
         if (!Invoice::hasInvoice($orderId)) {
-            $invoice = Invoice::find($orderId);
+            $invoice = new Invoice();
+            $invoice->id = $orderId;
             $invoice->markAsInvoiced();
         }
 
@@ -305,7 +308,8 @@ class InvoiceController extends Controller
             if ($order && $order->order_from == 3 && $order->complete_order == 1) {
                 // Check if invoice doesn't already exist
                 if (!Invoice::hasInvoice($orderId)) {
-                    $invoice = Invoice::find($orderId);
+                    $invoice = new Invoice();
+                    $invoice->id = $orderId;
                     $invoice->markAsInvoiced();
                     
                     return [

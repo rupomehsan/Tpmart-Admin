@@ -73,7 +73,16 @@ class Invoice extends Model
         $this->invoice_no = self::generateInvoiceNumber($this->id);
         $this->invoice_date = now();
         $this->invoice_generated = 1;
-        $this->save();
+        
+        // Update the order record directly
+        \DB::table('orders')
+            ->where('id', $this->id)
+            ->update([
+                'invoice_no' => $this->invoice_no,
+                'invoice_date' => $this->invoice_date,
+                'invoice_generated' => $this->invoice_generated,
+                'updated_at' => now()
+            ]);
         
         return $this;
     }
